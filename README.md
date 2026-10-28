@@ -4,13 +4,23 @@ An [MCP](https://modelcontextprotocol.io) server that lets Claude (or any other 
 [Technitium DNS Server](https://technitium.com/dns/) instances through their HTTP API — reading stats, zones, records
 and query logs, and optionally making changes.
 
+It ships as a ready-to-run Docker image — no need to clone or build anything:
+
+```
+ghcr.io/phillipunzen/technitium-mcp:latest
+```
+
+Multi-arch (`linux/amd64`, `linux/arm64`). Tags: `latest`, `main`, `sha-<commit>` and semver tags for releases.
+
+## Features
+
 - **Multi-server:** configure any number of servers; most tools accept `server: "all"` and run in parallel, so one
   server being down never blocks the others.
 - **Zone diff:** `compare_zone` shows records that exist on only one server and TTL differences — handy for keeping
   a primary/secondary pair or two independent resolvers in sync.
-- **Safe by default:** the HTTP endpoint refuses to start without authentication, write tools can be hidden globally
+- **Safe by default:** the endpoint refuses to start without authentication, write tools can be hidden globally
   or locked per server, and Technitium API tokens are never placed in URLs.
-- **Two transports:** stateless Streamable HTTP (`/mcp`) for running as a container, or stdio for local use.
+- **Two transports:** stateless Streamable HTTP (`/mcp`) for running as a service, or stdio for local clients.
 
 ## Tools
 
@@ -36,15 +46,52 @@ Ideally create a dedicated user (e.g. `claude`) under **Administration → Users
 *View* only if Claude should never change anything. Then sign in as that user and use **Create API Token** from the
 user menu (or, as an admin, **Administration → Sessions → Create Token**).
 
-### 2. Configure
+### 2. Create `docker-compose.yml`
+
+```yaml
+services:
+  technitium-mcp:
+    image: ghcr.io/phillipunzen/technitium-mcp:latest
+    container_name: technitium-mcp
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8787:8787"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 256m
+```
+
+### 3. Create `.env`
+
+```dotenv
+# Technitium servers (any number, numbered consecutively)
+TDNS_1_NAME=dns1
+TDNS_1_URL=https://dns1.example.lan:53443
+TDNS_1_TOKEN=<technitium api token>
+
+TDNS_2_NAME=dns2
+TDNS_2_URL=https://dns2.example.lan:53443
+TDNS_2_TOKEN=<technitium api token>
+
+# Endpoint protection – generate with: openssl rand -hex 32
+MCP_AUTH_TOKEN=<random>
+MCP_PATH_SECRET=<random>
+```
+
+### 4. Start
 
 ```bash
-git clone https://github.com/phillipunzen/technitium-mcp.git
-cd technitium-mcp
-cp .env.example .env
-openssl rand -hex 32   # use for MCP_AUTH_TOKEN
-openssl rand -hex 32   # use for MCP_PATH_SECRET
+docker compose up -d
+curl http://localhost:8787/healthz
 ```
+
+Update later with `docker compose pull && docker compose up -d`.
+
+## Configuration
 
 | Variable | Description |
 |---|---|
@@ -61,17 +108,6 @@ openssl rand -hex 32   # use for MCP_PATH_SECRET
 
 At least one of `MCP_AUTH_TOKEN` and `MCP_PATH_SECRET` is required in HTTP mode.
 
-### 3. Run with Docker
-
-```bash
-docker compose up -d
-curl http://localhost:8787/healthz
-```
-
-The image `ghcr.io/phillipunzen/technitium-mcp` is built for `linux/amd64` and `linux/arm64` on every push to `main`
-(tags `latest`, `main`, `sha-…`, and semver for `v*` tags). To build locally instead, replace `image:` with
-`build: .` in `docker-compose.yml`.
-
 ## Connecting a client
 
 **Claude Code** (or any client that can send headers):
@@ -86,18 +122,15 @@ claude mcp add --scope user --transport http technitium https://dns-mcp.example.
 endpoint must be reachable over HTTPS from the internet (e.g. behind a reverse proxy). The Technitium servers
 themselves stay on your LAN — only the container needs to reach them.
 
-**Local stdio** (no container, e.g. Claude Desktop):
+**Local stdio** (e.g. Claude Desktop), using the same image:
 
 ```json
 {
   "mcpServers": {
     "technitium": {
-      "command": "node",
-      "args": ["/path/to/technitium-mcp/dist/index.js", "--stdio"],
-      "env": {
-        "TDNS_1_NAME": "dns1", "TDNS_1_URL": "https://dns1.example.lan:53443", "TDNS_1_TOKEN": "…",
-        "TDNS_2_NAME": "dns2", "TDNS_2_URL": "https://dns2.example.lan:53443", "TDNS_2_TOKEN": "…"
-      }
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "--env-file", "/path/to/.env",
+               "ghcr.io/phillipunzen/technitium-mcp:latest", "node", "dist/index.js", "--stdio"]
     }
   }
 }
@@ -112,17 +145,6 @@ themselves stay on your LAN — only the container needs to reach them.
   All calls are `POST` with form data, so tokens never appear in URLs or access logs.
 - `query_logs` needs a query logger app installed on the server, such as *Query Logs (Sqlite)* from the app store.
 - Deleting zones requires `confirm: true`, and the server instructions tell the model to ask the user first.
-
-## Development
-
-```bash
-npm install
-npm run build
-npm test   # end-to-end test against two mocked Technitium servers
-```
-
-Requires Node.js 20 or newer. Built with the official
-[MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk).
 
 ## License
 
