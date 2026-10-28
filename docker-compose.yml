@@ -1,0 +1,28 @@
+# Betrieb auf der Docker-VM:
+#   1. .env aus .env.example erstellen und ausfüllen
+#   2. Einmalig an GHCR anmelden (Image ist privat):
+#        echo <GitHub-PAT mit read:packages> | docker login ghcr.io -u phillipunzen --password-stdin
+#   3. docker compose up -d
+#   Update: docker compose pull && docker compose up -d
+
+services:
+  technitium-mcp:
+    image: ghcr.io/phillipunzen/technitium-mcp:latest
+    # Alternativ lokal aus dem Repo bauen:
+    # build: .
+    container_name: technitium-mcp
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8787:8787"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
