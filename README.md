@@ -1,77 +1,129 @@
 # technitium-mcp
 
-MCP-Server, über den Claude auf einen oder mehrere **Technitium DNS Server** zugreift – lesend und (optional) schreibend.
-Streamable HTTP (zustandslos, Endpunkt `/mcp`) für den Betrieb als Container, alternativ stdio für den lokalen Start.
+An [MCP](https://modelcontextprotocol.io) server that lets Claude (or any other MCP client) work with one or more
+[Technitium DNS Server](https://technitium.com/dns/) instances through their HTTP API — reading stats, zones, records
+and query logs, and optionally making changes.
+
+- **Multi-server:** configure any number of servers; most tools accept `server: "all"` and run in parallel, so one
+  server being down never blocks the others.
+- **Zone diff:** `compare_zone` shows records that exist on only one server and TTL differences — handy for keeping
+  a primary/secondary pair or two independent resolvers in sync.
+- **Safe by default:** the HTTP endpoint refuses to start without authentication, write tools can be hidden globally
+  or locked per server, and Technitium API tokens are never placed in URLs.
+- **Two transports:** stateless Streamable HTTP (`/mcp`) for running as a container, or stdio for local use.
 
 ## Tools
 
-| Lesen | Schreiben (ausblendbar mit `MCP_READ_ONLY=true`) |
+| Read | Write (hidden with `MCP_READ_ONLY=true`) |
 |---|---|
-| `list_servers` – Erreichbarkeit, Version, Cluster, Token-Rechte | `add_record` / `update_record` / `delete_record` |
-| `get_stats`, `get_top_stats` – Dashboard-Kennzahlen, Top-Listen | `create_zone`, `set_zone_enabled`, `delete_zone` (nur mit `confirm: true`) |
-| `list_zones`, `get_records` | `manage_block_or_allow` – Domain blocken/erlauben |
-| `compare_zone` – Records einer Zone zwischen zwei Servern abgleichen | `flush_cache` – ganzer Cache oder einzelner Name |
-| `resolve` – DNS-Abfrage über den Server (oder einen beliebigen Upstream) | `disable_blocking_temporarily` |
-| `query_logs` – Query-Logs filtern (Logger-App wird automatisch erkannt) | `update_blocklists` |
+| `list_servers` – reachability, version, cluster state, token permissions | `add_record`, `update_record`, `delete_record` |
+| `get_stats`, `get_top_stats` – dashboard figures and top clients/domains | `create_zone`, `set_zone_enabled`, `delete_zone` (requires `confirm: true`) |
+| `list_zones`, `get_records` | `manage_block_or_allow` – block or allow a domain |
+| `compare_zone` – diff a zone between two servers | `flush_cache` – whole cache or a single name |
+| `resolve` – query through the server or any upstream | `disable_blocking_temporarily` |
+| `query_logs` – filter query logs (logger app is auto-detected) | `update_blocklists` |
 | `list_cache`, `list_block_or_allow`, `list_dhcp_leases`, `get_cluster_state`, `get_settings` | |
 
-Fast alle Tools nehmen `server: "dns1" | "dns2" | "all"`. Bei `all` wird parallel auf allen Servern ausgeführt; fällt einer aus, liefern die anderen trotzdem ihr Ergebnis.
+Record tools take the common fields directly and pass type-specific fields through `fields`, using Technitium's own
+parameter names — e.g. `{ ipAddress: "192.168.1.10", ptr: true }` for an A record. For updates, the old value
+identifies the record and the new value uses the `new` prefix (`newIpAddress`, `newCname`, `newValue`, …).
 
-## 1. API-Token in Technitium anlegen (auf beiden Servern)
+## Quick start
 
-1. Am besten einen eigenen Benutzer `claude` anlegen (Administration → Users) und ihm nur die nötigen Rechte geben – z. B. nur *View*, wenn Claude nichts ändern soll.
-2. Als dieser Benutzer anmelden → Benutzermenü oben rechts → **Create API Token** (oder als Admin unter Administration → Sessions → *Create Token* für den Benutzer).
-3. Token in `.env` eintragen.
+### 1. Create an API token on each Technitium server
 
-Das Token wird nur als `Authorization: Bearer`-Header bzw. im POST-Body übertragen, nie in der URL.
+Ideally create a dedicated user (e.g. `claude`) under **Administration → Users** with only the permissions it needs —
+*View* only if Claude should never change anything. Then sign in as that user and use **Create API Token** from the
+user menu (or, as an admin, **Administration → Sessions → Create Token**).
 
-## 2. Konfiguration
+### 2. Configure
 
 ```bash
+git clone https://github.com/phillipunzen/technitium-mcp.git
+cd technitium-mcp
 cp .env.example .env
-openssl rand -hex 32   # für MCP_AUTH_TOKEN
-openssl rand -hex 32   # für MCP_PATH_SECRET
+openssl rand -hex 32   # use for MCP_AUTH_TOKEN
+openssl rand -hex 32   # use for MCP_PATH_SECRET
 ```
 
-Pro Server `TDNS_<n>_NAME`, `_URL`, `_TOKEN`, optional `_VERIFY_TLS=false` (selbstsigniertes Zertifikat) und `_READ_ONLY=true` (nur dieser Server schreibgeschützt – praktisch für einen Cluster-Secondary).
+| Variable | Description |
+|---|---|
+| `TDNS_<n>_NAME` | Short name used in tool calls (default `dns<n>`) |
+| `TDNS_<n>_URL` | Web console URL, e.g. `https://dns1.example.lan:53443` |
+| `TDNS_<n>_TOKEN` | Technitium API token |
+| `TDNS_<n>_VERIFY_TLS` | `false` to accept self-signed certificates (default `true`) |
+| `TDNS_<n>_READ_ONLY` | `true` to block write tools for this server only, e.g. a cluster secondary |
+| `MCP_AUTH_TOKEN` | Bearer token clients must send (`Authorization: Bearer …`) |
+| `MCP_PATH_SECRET` | Optional secret path `/mcp/<secret>` for clients that cannot set headers (min. 24 chars) |
+| `MCP_READ_ONLY` | `true` hides all write tools |
+| `PORT` / `HOST` | Listen address (default `0.0.0.0:8787`) |
+| `TDNS_TIMEOUT_MS` | Timeout per Technitium API call (default `15000`) |
 
-## 3. Starten
+At least one of `MCP_AUTH_TOKEN` and `MCP_PATH_SECRET` is required in HTTP mode.
+
+### 3. Run with Docker
 
 ```bash
 docker compose up -d
 curl http://localhost:8787/healthz
 ```
 
-Ohne GHCR-Image: in `docker-compose.yml` `image:` durch `build: .` ersetzen. Das Workflow-File `.github/workflows/docker.yml` baut bei Push auf `main` automatisch `ghcr.io/<owner>/technitium-mcp` (amd64 + arm64).
+The image `ghcr.io/phillipunzen/technitium-mcp` is built for `linux/amd64` and `linux/arm64` on every push to `main`
+(tags `latest`, `main`, `sha-…`, and semver for `v*` tags). To build locally instead, replace `image:` with
+`build: .` in `docker-compose.yml`.
 
-## 4. In Claude einbinden
+## Connecting a client
 
-**Claude Code / Desktop (Header möglich):**
+**Claude Code** (or any client that can send headers):
+
 ```bash
-claude mcp add --scope user --transport http technitium https://dns-mcp.example.de/mcp \
+claude mcp add --scope user --transport http technitium https://dns-mcp.example.com/mcp \
   --header "Authorization: Bearer <MCP_AUTH_TOKEN>"
 ```
 
-**claude.ai Custom Connector:** Einstellungen → Connectors → *Add custom connector*, URL:
-`https://dns-mcp.example.de/mcp/<MCP_PATH_SECRET>`
-claude.ai ruft den Connector aus der Anthropic-Cloud auf – der Endpunkt muss also per HTTPS von außen erreichbar sein (Reverse-Proxy, z. B. HAProxy). Die Technitium-Server selbst bleiben im LAN; nur der MCP-Container braucht Zugriff auf sie.
+**claude.ai custom connector:** Settings → Connectors → *Add custom connector* with the URL
+`https://dns-mcp.example.com/mcp/<MCP_PATH_SECRET>`. claude.ai calls connectors from Anthropic's cloud, so this
+endpoint must be reachable over HTTPS from the internet (e.g. behind a reverse proxy). The Technitium servers
+themselves stay on your LAN — only the container needs to reach them.
 
-**Lokal per stdio (ohne Container):**
+**Local stdio** (no container, e.g. Claude Desktop):
+
 ```json
-{ "command": "node", "args": ["/pfad/technitium-mcp/dist/index.js", "--stdio"],
-  "env": { "TDNS_1_URL": "...", "TDNS_1_TOKEN": "...", "TDNS_2_URL": "...", "TDNS_2_TOKEN": "..." } }
+{
+  "mcpServers": {
+    "technitium": {
+      "command": "node",
+      "args": ["/path/to/technitium-mcp/dist/index.js", "--stdio"],
+      "env": {
+        "TDNS_1_NAME": "dns1", "TDNS_1_URL": "https://dns1.example.lan:53443", "TDNS_1_TOKEN": "…",
+        "TDNS_2_NAME": "dns2", "TDNS_2_URL": "https://dns2.example.lan:53443", "TDNS_2_TOKEN": "…"
+      }
+    }
+  }
+}
 ```
 
-## Hinweise
+## Notes
 
-- **Cluster oder zwei Einzelserver?** Bilden die beiden Server einen Technitium-Cluster, Änderungen nur auf dem Primary vornehmen (Secondary am besten `TDNS_n_READ_ONLY=true`). Laufen sie unabhängig, Änderungen mit `server: "all"` auf beide schreiben und danach mit `compare_zone` prüfen.
-- Ab Technitium v15 wird das Token per Bearer-Header erwartet; ältere Versionen werden über das zusätzliche `token`-Formularfeld weiter bedient.
-- `query_logs` braucht eine installierte Query-Logger-App (z. B. *Query Logs (Sqlite)* aus dem App-Store).
+- **Cluster or independent servers?** If your servers form a Technitium cluster, only write to the primary (and set
+  the secondary to `TDNS_<n>_READ_ONLY=true`). If they run independently, write to both with `server: "all"` and
+  verify with `compare_zone`.
+- Technitium v15+ expects the token as a bearer header; it is also sent as a form field so older versions keep working.
+  All calls are `POST` with form data, so tokens never appear in URLs or access logs.
+- `query_logs` needs a query logger app installed on the server, such as *Query Logs (Sqlite)* from the app store.
+- Deleting zones requires `confirm: true`, and the server instructions tell the model to ask the user first.
 
-## Entwicklung
+## Development
 
 ```bash
 npm install
 npm run build
-npm test        # Ende-zu-Ende-Test gegen zwei simulierte Technitium-Server
+npm test   # end-to-end test against two mocked Technitium servers
 ```
+
+Requires Node.js 20 or newer. Built with the official
+[MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk).
+
+## License
+
+MIT
